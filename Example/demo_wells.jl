@@ -10,23 +10,24 @@ using PSIS
 
 include("cvit.jl")
 
+do_kfcv = false
 
 # Data
-data = JSON.parsefile("wells.data.json")
+data = JSON.parsefile(joinpath(@__DIR__,"wells.data.json"))
 y = Float64.(data["switched"])
 x = Float64[data["arsenic"]  data["dist"]]
 n, m = size(x)
 
 # Model
-model_str = readstring(open("arsenic_logistic.stan"))
-stanmodel = Stanmodel(name="arsenic_logistic", adapt=500, update=500, model=model_str)
+model_str = readstring(open(joinpath(@__DIR__,"arsenic_logistic.stan")))
+stanmodel = Stanmodel(name="arsenic_logistic", num_warmup=500, num_samples=500, model=model_str)
 
 if isfile("sim.jls")
     sim = read("sim.jls", Chains)
 else
     standata = [Dict("p" => m, "N" => n, "y" => y, "x" => x)]
     # Fit the model in Stan
-    sim = stan(stanmodel, standata, '.', CmdStanDir=CMDSTAN_HOME, summary=false)
+    rc,sim = stan(stanmodel, standata, ".", CmdStanDir=CMDSTAN_HOME, summary=false)
     write("sim.jls", sim)
 end
 
@@ -49,7 +50,7 @@ else
     @printf(">> %d (%.0f%%) PSIS Pareto k estimates greater than 1\n", pkn2, pkn2/n*100)
 end
 
-exit()
+# exit()
 # Fit a second model, using log(arsenic) instead of arsenic
 x2 = Float64[log.(data["arsenic"])  data["dist"]]
 
@@ -59,7 +60,7 @@ if isfile("sim2.jls")
 else
     standata2 = [Dict("p" => m, "N" => n, "y" => y, "x" => x2)]
     # Fit the model in Stan
-    sim2 = stan(stanmodel, standata2, '.', CmdStanDir=CMDSTAN_HOME, summary=false)
+    rc,sim2 = stan(stanmodel, standata2, ".", CmdStanDir=CMDSTAN_HOME, summary=false)
     write("sim2.jls", sim2)
 end
 
@@ -71,11 +72,11 @@ se_elpd_loo = std(loos2) * sqrt(n)
 @printf(">> elpd_loo = %.1f, SE(elpd_loo) = %.1f\n", elpd_loo, se_elpd_loo)
 
 # Check the shape parameter k of the generalized Pareto distribution
-if all(pk .< 0.5)
+if all(pk2 .< 0.5)
     println("All Pareto k estimates OK (k < 0.5)")
 else
-    pkn1 = sum((pk .>= 0.5) & (pk .< 1))
-    pkn2 = sum(pk .>= 1)
+    pkn1 = sum((pk2 .>= 0.5) & (pk .< 1))
+    pkn2 = sum(pk2 .>= 1)
     @printf(">> %d (%.0f%%) PSIS Pareto k estimates between 0.5 and 1\n", pkn1, pkn1/n*100)
     @printf(">> %d (%.0f%%) PSIS Pareto k estimates greater than 1\n", pkn2, pkn2/n*100)
 end
@@ -84,24 +85,25 @@ end
 loodiff = loos - loos2
 @printf("elpd_diff = %.1f, SE(elpd_diff) = %.1f\n",sum(loodiff), std(loodiff) * sqrt(n))
 
-
+if do_kfcv
 ## k-fold-CV
 # k-fold-CV should be used if several khats>0.5
 # in this case it is not needed, but provided as an example
-model_str = readstring(open("arsenic_logistic_t.stan"))
-stanmodel = Stanmodel(name="arsenic_logistic_t", adapt=500, update=500, model=model_str);
+model_str = readstring(open(joinpath(@__DIR__,"arsenic_logistic_t.stan")))
+stanmodel = Stanmodel(name="arsenic_logistic_t", num_warmup=500, num_samples=500, model=model_str);
 
-cvitr, cvitst = cvit(n, 10, true)
+nfolds = 5
+cvitr, cvitst = cvit(n, nfolds, true)
 kfcvs = similar(loos)
-for cvi in 1:10
-    @printf("%d\n", cvi)
+for cvi in 1:nfolds
+    @printf("fold %d\n", cvi)
 
     standatacv = [Dict("p" => m, "N" => length(cvitr[cvi]), "Nt" => length(cvitst[cvi]),
                         "x" => x[cvitr[cvi],:], "y" => y[cvitr[cvi]],
                         "xt" => x[cvitst[cvi],:], "yt" => y[cvitst[cvi]])
                  ]
     # Fit the model in Stan
-    simcv = stan(stanmodel, standatacv, '.', 
+    rc, simcv = stan(stanmodel, standatacv, ".",
                  CmdStanDir=CMDSTAN_HOME, summary=false)
     ns = filter(x->startswith(x,"log_likt"), simcv.names)
     log_likt = Mamba.combine(simcv[:, ns, :])
@@ -112,7 +114,8 @@ end
 p = plot(layer(x = loos, y = kfcvs, Geom.point),
      layer(x = [-3.5,0] ,y=[-3.5,0], Geom.line, style(default_color=colorant"red")),
      Guide.xlabel("PSIS-LOO"),
-     Guide.ylabel("10-fold-CV"))
+     Guide.ylabel("$(nfolds)-fold-CV"))
 
-draw(PDF("Compare.pdf", 210mm, 210mm),p) 
+draw(PDF("Compare.pdf", 210mm, 210mm),p)
 
+end # if do_kfcv
